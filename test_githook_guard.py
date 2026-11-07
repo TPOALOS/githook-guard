@@ -52,6 +52,66 @@ class PatternTests(unittest.TestCase):
         self.assertEqual(gg.scan_text('password = "hunter2hunter2"')[0][1], "hardcoded-secret")  # githook-guard:ignore secretscan:ignore
 
 
+def tok(*parts):
+    return "".join(parts)
+
+
+NEW = {
+    "gitlab-token": tok("glpat-", "abcdEFGH1234ijklMNOP5678"),  # secretscan:ignore
+    "npm-token": tok("npm_", "a1B2c3D4e5F6g7H8i9J0k1L2m3N4o5P6q7R8"),  # secretscan:ignore
+    "sendgrid-key": tok("SG.", "a" * 22, ".", "b" * 43),
+    "anthropic-key": tok("sk-ant-", "api03-abcdEFGH1234ijklMNOP5678"),  # secretscan:ignore
+    "openai-key": tok("sk-", "proj-", "abcdEFGH1234ijklMNOP5678qrstUVWX"),  # secretscan:ignore
+    "webhook-url": tok("https://hooks.slack", ".com/services/T01ABCDEF/B02GHIJKL/", "x" * 24),
+    "jwt": tok("eyJ", "hbGciOiJIUzI1NiJ9", ".eyJ", "zdWIiOiIxMjM0NTY3ODkwIn0", ".", "abcdEFGH1234ijkl"),
+    "url-credentials": tok("postgres://", "admin:", "S3cr3tPassw0rd", "@db.internal:5432/app"),
+}
+
+
+class NewPatternTests(unittest.TestCase):
+    def test_new_detectors(self):
+        for rule, value in NEW.items():
+            with self.subTest(rule=rule):
+                self.assertIn(rule, [r for _, r in gg.scan_text("x = %s" % value)])
+
+    def test_placeholders_and_plain_urls_ok(self):
+        for text in ("https://example.com/x", "postgres://user:password@localhost/db",
+                     "postgres://user:${PASS}@localhost/db", "sk-short"):
+            self.assertEqual(gg.scan_text(text), [], text)
+
+    def test_new_forbidden_names(self):
+        for bad in ("infra/prod.tfvars", ".git-credentials", "android/release.keystore"):
+            self.assertTrue(gg.FORBIDDEN_NAMES.search(bad), bad)
+        for ok in ("infra/prod.tfvars.example", "keystore.md", "tfvars.py"):
+            self.assertFalse(gg.FORBIDDEN_NAMES.search(ok), ok)
+
+
+@unittest.skipUnless(HAVE_GIT, "git not installed")
+class AllowListTests(unittest.TestCase):
+    def setUp(self):
+        self.repo = make_repo()
+
+    def tearDown(self):
+        shutil.rmtree(self.repo, ignore_errors=True)
+
+    def test_allow_glob_exempts_fixtures(self):
+        stage(self.repo, "tests/fixtures/leaky.txt", "k = %s\n" % AWS)
+        self.assertEqual(do_check(self.repo)[0], 1)
+        run(["git", "config", "--add", "githookguard.allow", "tests/fixtures/*"], self.repo)
+        self.assertEqual(do_check(self.repo)[0], 0)
+
+    def test_allow_by_basename_and_forbidden_name(self):
+        stage(self.repo, "deploy/prod.tfvars", "region = 1\n")
+        self.assertEqual(do_check(self.repo)[0], 1)
+        run(["git", "config", "--add", "githookguard.allow", "prod.tfvars"], self.repo)
+        self.assertEqual(do_check(self.repo)[0], 0)
+
+    def test_allow_does_not_exempt_other_files(self):
+        run(["git", "config", "--add", "githookguard.allow", "tests/*"], self.repo)
+        stage(self.repo, "src/a.py", "k = %s\n" % AWS)
+        self.assertEqual(do_check(self.repo)[0], 1)
+
+
 @unittest.skipUnless(HAVE_GIT, "git not installed")
 class CheckTests(unittest.TestCase):
     def setUp(self):

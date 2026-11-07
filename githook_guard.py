@@ -10,6 +10,7 @@ commit if something is wrong. Standard library only (needs the git command).
 Bypass once with `git commit --no-verify`.
 """
 import argparse
+import fnmatch
 import os
 import re
 import shutil
@@ -17,7 +18,7 @@ import stat
 import subprocess
 import sys
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 MARKER = "# githook-guard managed hook"
 HOOK_TOOL = "githook_guard.py"
 IGNORE_MARK = "githook-guard:ignore"
@@ -26,7 +27,7 @@ DEFAULT_MAX_MB = 5.0
 FORBIDDEN_NAMES = re.compile(
     r"(?i)(^|/)(\.env(\.(?!example$|sample$|template$|dist$)[^/]+)?|id_(rsa|dsa|ecdsa|ed25519)|"
     r"[^/]+\.(pem|key|p12|pfx|jks|kdbx|ovpn)|\.htpasswd|credentials\.json|terraform\.tfstate(\.backup)?|"
-    r"\.netrc|\.pgpass|secrets?\.(ya?ml|json|toml))$")
+    r"\.netrc|\.pgpass|\.git-credentials|[^/]+\.(tfvars|keystore)|secrets?\.(ya?ml|json|toml))$")
 SECRET_PATTERNS = [
     ("aws-access-key-id", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("github-token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{50,})\b")),
@@ -34,10 +35,22 @@ SECRET_PATTERNS = [
     ("slack-token", re.compile(r"\bxox[baprs]-[A-Za-z0-9-]{10,}\b")),
     ("google-api-key", re.compile(r"\bAIza[0-9A-Za-z_-]{35}\b")),
     ("stripe-live-key", re.compile(r"\b[sr]k_live_[0-9a-zA-Z]{24,}\b")),
+    ("gitlab-token", re.compile(r"\bglpat-[A-Za-z0-9_-]{20,}\b")),
+    ("npm-token", re.compile(r"\bnpm_[A-Za-z0-9]{36}\b")),
+    ("pypi-token", re.compile(r"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}\b")),
+    ("sendgrid-key", re.compile(r"\bSG\.[A-Za-z0-9_-]{22}\.[A-Za-z0-9_-]{43}\b")),
+    ("anthropic-key", re.compile(r"\bsk-ant-[A-Za-z0-9_-]{20,}\b")),
+    ("openai-key", re.compile(r"\bsk-(?!ant-)(?:proj-)?[A-Za-z0-9_-]{32,}\b")),
+    ("webhook-url", re.compile(
+        r"https://(?:hooks\.slack\.com/services/T[A-Za-z0-9]+/B[A-Za-z0-9]+/[A-Za-z0-9]{20,}|"
+        r"(?:ptb\.|canary\.)?discord(?:app)?\.com/api/webhooks/\d{17,20}/[A-Za-z0-9_-]{50,})")),
+    ("jwt", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\b")),
+    ("url-credentials", re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s:/@'\"]+:([^\s@'\"/]{6,})@[^\s'\"]+")),
     ("hardcoded-secret", re.compile(
         r"(?i)\b(?:password|passwd|secret|api[_-]?key|token)\b\s*[:=]\s*['\"]([^'\"\s]{8,})['\"]")),
 ]
-PLACEHOLDER = re.compile(r"(?i)example|placeholder|changeme|your[_-]|xxxx|<.*>|\$\{|dummy")
+PLACEHOLDER = re.compile(r"(?i)example|placeholder|changeme|your[_-]|xxxx|<.*>|\$\{|dummy|^(?:pass(?:word)?|secret|\*+)$")
+CHECKED_VALUE = ("hardcoded-secret", "url-credentials")
 PERSONAL_DOMAINS = {"gmail.com", "googlemail.com", "icloud.com", "me.com", "outlook.com", "hotmail.com",
                     "live.com", "yahoo.com", "proton.me", "protonmail.com", "pm.me", "hey.com", "aol.com"}
 
@@ -58,6 +71,17 @@ def config_value(cwd, key, default):
     return r.stdout.strip() if r.returncode == 0 and r.stdout.strip() else default
 
 
+def allowed_paths(cwd):
+    """Glob patterns from `git config githookguard.allow` (repeatable) that are exempt from file checks."""
+    r = git(["config", "--get-all", "githookguard.allow"], cwd, text=True)
+    return [ln.strip() for ln in r.stdout.splitlines() if ln.strip()] if r.returncode == 0 else []
+
+
+def is_allowed(path, patterns):
+    base = os.path.basename(path)
+    return any(fnmatch.fnmatch(path, p) or fnmatch.fnmatch(base, p) for p in patterns)
+
+
 def staged_files(cwd):
     r = git(["diff", "--cached", "--name-only", "--diff-filter=ACM", "-z"], cwd)
     return [n for n in r.stdout.decode(errors="replace").split("\0") if n]
@@ -72,7 +96,7 @@ def scan_text(text):
             m = rx.search(line)
             if not m:
                 continue
-            if name == "hardcoded-secret" and PLACEHOLDER.search(m.group(1)):
+            if name in CHECKED_VALUE and PLACEHOLDER.search(m.group(1)):
                 continue
             hits.append((no, name))
     return hits
@@ -95,7 +119,10 @@ def check(cwd=None, out=sys.stderr):
     max_mb = float(config_value(cwd, "githookguard.maxsizemb", DEFAULT_MAX_MB))
     id_mode = config_value(cwd, "githookguard.identity", "warn")
     problems, warnings = [], []
+    allow = allowed_paths(cwd)
     for path in staged_files(cwd):
+        if is_allowed(path, allow):
+            continue
         if FORBIDDEN_NAMES.search(path):
             problems.append("%s: sensitive file type must not be committed" % path)
             continue
