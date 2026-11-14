@@ -66,3 +66,7 @@ python3 -m unittest -v
 ## License
 
 MIT (c) TPOALOS
+
+---
+
+**More tools by [TPOALOS](https://github.com/TPOALOS):** [gitidentity-audit](https://github.com/TPOALOS/gitidentity-audit) · [logscrub](https://github.com/TPOALOS/logscrub) · [shellhist-scrub](https://github.com/TPOALOS/shellhist-scrub) · [all 51 tools](https://tpoalos.github.io)
